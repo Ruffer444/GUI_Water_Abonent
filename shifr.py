@@ -1,6 +1,6 @@
 # ============================================================
 # ЛЧМ + ChaCha20 | 1×1 км
-# Полная версия + отражение сигнала от запретных зон
+# Строй = ромб вокруг TX + пунктир к лидеру
 # ============================================================
 import pygame
 import math
@@ -45,7 +45,7 @@ AGENT_COLORS = [(100, 160, 220), (220, 100, 160), (160, 220, 100), (230, 180, 90
 AGENT_TX_COLOR = (255, 120, 60)
 AGENT_RX_COLOR = (80, 230, 120)
 WAVE_COLOR     = (100, 200, 255)
-REFLECT_COLOR  = (180, 140, 255)   # фиолетовый — отражённая волна
+REFLECT_COLOR  = (180, 140, 255)
 
 # -------------------- Физика --------------------
 AGENT_RADIUS_M    = 11.0
@@ -72,8 +72,17 @@ VECTOR_LINE_WIDTH = 3
 
 SAFETY_MARGIN = 38.0
 
+# Ромб вокруг лидера
+FORMATION_DIST = 45.0
+DIAMOND_OFFSETS = [
+    (-FORMATION_DIST,  0.0),
+    ( FORMATION_DIST,  0.0),
+    ( 0.0, -FORMATION_DIST),
+    ( 0.0,  FORMATION_DIST),
+]
+
 # -------------------- Отражение --------------------
-REFLECT_COEFF   = 0.55      # < 1 → без усиления
+REFLECT_COEFF   = 0.55
 MAX_BOUNCES     = 1
 reflect_enabled = True
 
@@ -199,7 +208,6 @@ def build_avoiding_route(start_x, start_y, agent_id):
     for y in range(170, 861, 100):
         candidates.append((70.0, float(y)))
         candidates.append((930.0, float(y)))
-
     extra = [
         (200, 200), (500, 150), (800, 200),
         (180, 500), (820, 500),
@@ -207,15 +215,12 @@ def build_avoiding_route(start_x, start_y, agent_id):
         (350, 300), (650, 300), (350, 700), (650, 700),
     ]
     candidates.extend(extra)
-
     safe_pts = [p for p in candidates if is_safe(p[0], p[1])]
     if len(safe_pts) < 6:
         safe_pts = [(70, 70), (930, 70), (930, 930), (70, 930)]
-
     rng = random.Random(agent_id * 41 + 3)
     cx, cy = WORLD_W / 2, WORLD_H / 2
     safe_pts.sort(key=lambda p: math.atan2(p[1] - cy, p[0] - cx))
-
     step = max(1, len(safe_pts) // 9)
     offset = rng.randint(0, max(0, step - 1))
     chosen = []
@@ -225,23 +230,19 @@ def build_avoiding_route(start_x, start_y, agent_id):
             break
     if len(chosen) < 4:
         chosen = safe_pts[::max(1, len(safe_pts) // 8)][:9]
-
     raw = list(chosen)
     if math.hypot(raw[0][0] - start_x, raw[0][1] - start_y) > 80:
         raw.insert(0, (start_x, start_y))
     raw.append(raw[0])
-
     route = [raw[0]]
     for i in range(len(raw) - 1):
         a = raw[i]
         b = raw[i + 1]
         seg = make_safe_path(a[0], a[1], b[0], b[1])
         route.extend(seg)
-
     if len(route) > 1 and math.hypot(route[-1][0] - route[0][0],
                                      route[-1][1] - route[0][1]) < 10:
         route.pop()
-
     cleaned = [route[0]]
     for p in route[1:]:
         if math.hypot(p[0] - cleaned[-1][0], p[1] - cleaned[-1][1]) > 10:
@@ -278,6 +279,15 @@ def respawn_agents(agents):
     event_log.appendleft((sim_time, "Координаты аппаратов перегенерированы (N)"))
 
 
+def assign_formation_slots(agents, leader_id):
+    slot = 0
+    for a in agents:
+        if a.id == leader_id:
+            continue
+        a.form_slot = slot
+        slot += 1
+
+
 # ============================================================
 # Абонент
 # ============================================================
@@ -305,11 +315,10 @@ class Agent:
         self.last_decoded_ok = False
 
         self.battery = 100.0
-        self.form_dx = 0.0
-        self.form_dy = 0.0
         self.wp_list = []
         self.wp_idx = 0
         self.known_positions = {}
+        self.form_slot = 0
 
     def rebuild_route(self):
         self.wp_list = build_avoiding_route(self.x, self.y, self.id)
@@ -333,18 +342,21 @@ class Agent:
 
         desired_vx, desired_vy = self.vx, self.vy
 
-        if formation_mode and leader and self.id != leader.id:
-            tx = leader.x + self.form_dx
-            ty = leader.y + self.form_dy
-            dx, dy = tx - self.x, ty - self.y
+        # ----- СТРОЙ / РОМБ вокруг TX -----
+        if formation_mode and leader is not None and self.id != leader.id:
+            ox, oy = DIAMOND_OFFSETS[self.form_slot % len(DIAMOND_OFFSETS)]
+            tx = leader.x + ox
+            ty = leader.y + oy
+            dx = tx - self.x
+            dy = ty - self.y
             dist = math.hypot(dx, dy)
+            APPROACH_SPEED = 14.0
             if dist > 3.0:
-                sp = min(14.0, dist * 0.9)
-                desired_vx = dx / dist * sp
-                desired_vy = dy / dist * sp
+                desired_vx = dx / dist * min(APPROACH_SPEED, dist * 0.9)
+                desired_vy = dy / dist * min(APPROACH_SPEED, dist * 0.9)
             else:
-                desired_vx = leader.vx * 0.95
-                desired_vy = leader.vy * 0.95
+                desired_vx = leader.vx
+                desired_vy = leader.vy
 
         elif waypoint_mode and self.wp_list:
             wx, wy = self.wp_list[self.wp_idx]
@@ -483,7 +495,7 @@ class Agent:
 
 
 # ============================================================
-# Волна (с отражением)
+# Волна
 # ============================================================
 class Wave:
     def __init__(self, x, y, tx_id, tx_time, payload_x, payload_y,
@@ -508,23 +520,18 @@ class Wave:
     def try_reflect(self, new_waves):
         if not reflect_enabled or self.bounce >= MAX_BOUNCES:
             return
-
         for zi, (zx1, zy1, zx2, zy2) in enumerate(NOGO_ZONES):
             if zi in self.reflected_from:
                 continue
-
             cx = max(zx1, min(self.x, zx2))
             cy = max(zy1, min(self.y, zy2))
             dist = math.hypot(self.x - cx, self.y - cy)
-
             if self.radius >= dist and self.radius - WAVE_SPEED_M * 0.05 <= dist + 8:
                 incident = self.attenuation_at(dist)
                 reflected_str = incident * REFLECT_COEFF
-
                 if reflected_str < 0.08:
                     self.reflected_from.add(zi)
                     continue
-
                 if dist < 1e-3:
                     rx, ry = cx, cy
                 else:
@@ -532,16 +539,12 @@ class Wave:
                     d = math.hypot(dx, dy) + 1e-6
                     rx = cx + dx / d * 6
                     ry = cy + dy / d * 6
-
                 new_waves.append(Wave(
-                    rx, ry,
-                    self.tx_id, self.tx_time,
+                    rx, ry, self.tx_id, self.tx_time,
                     self.payload_x, self.payload_y,
-                    strength=reflected_str,
-                    bounce=self.bounce + 1
+                    strength=reflected_str, bounce=self.bounce + 1
                 ))
                 self.reflected_from.add(zi)
-
                 event_log.appendleft(
                     (sim_time,
                      f"отражение от зоны #{zi+1}  str={reflected_str:.2f}  "
@@ -551,7 +554,6 @@ class Wave:
     def update(self, dt, agents, new_waves):
         self.radius += WAVE_SPEED_M * dt
         self.try_reflect(new_waves)
-
         for a in agents:
             if a.id in self.hit:
                 continue
@@ -561,12 +563,10 @@ class Wave:
                 local_str = self.attenuation_at(d)
                 if local_str < 0.06:
                     continue
-
                 a.rx_timer = GREEN_FLASH_SEC
                 a.received = True
                 a.last_dist = d
                 a.battery = max(0.0, a.battery - RX_DRAIN)
-
                 snr = max(0.0, 31.0 - 20 * math.log10(max(d, 1.0)) - d * 0.011)
                 snr *= local_str
                 a.last_snr = snr
@@ -574,7 +574,6 @@ class Wave:
                 success = random.random() < p
                 a.decrypted = success
                 a.last_decoded_ok = success
-
                 src = f"A{self.tx_id}" + ("~" if self.bounce > 0 else "")
                 if success:
                     dec_x, dec_y = self.payload_x, self.payload_y
@@ -607,7 +606,6 @@ class Wave:
                          f"SNR={snr:4.1f}  МУСОР"
                          + ("  [отраж]" if self.bounce else ""))
                     )
-
         max_r = WAVE_MAX_RADIUS_M * (0.7 if self.bounce else 1.0)
         if self.radius > max_r:
             self.alive = False
@@ -658,6 +656,49 @@ def draw_dashed_rect(screen, color, rect, dash=8, gap=6, width=2):
         cy += dash + gap
 
 
+def draw_dashed_line_alpha(surface, color, p1, p2, dash=7, gap=5, width=1):
+    x1, y1 = p1
+    x2, y2 = p2
+    dx, dy = x2 - x1, y2 - y1
+    length = math.hypot(dx, dy)
+    if length < 2:
+        return
+    ux, uy = dx / length, dy / length
+    dist = 0.0
+    draw = True
+    while dist < length:
+        seg = min(dash if draw else gap, length - dist)
+        if draw:
+            sx = x1 + ux * dist
+            sy = y1 + uy * dist
+            ex = x1 + ux * (dist + seg)
+            ey = y1 + uy * (dist + seg)
+            pygame.draw.line(surface, color, (int(sx), int(sy)), (int(ex), int(ey)), width)
+        dist += seg
+        draw = not draw
+
+
+def draw_formation_links(screen, agents, leader):
+    if not formation_mode or leader is None:
+        return
+    lx, ly = world_to_screen(leader.x, leader.y)
+    s = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+    col = (120, 200, 255, 110)
+    for a in agents:
+        if a.id == leader.id:
+            continue
+        ax, ay = world_to_screen(a.x, a.y)
+        draw_dashed_line_alpha(s, col, (ax, ay), (lx, ly), dash=7, gap=5, width=1)
+    screen.blit(s, (0, 0))
+
+    # контур ромба
+    pts = [world_to_screen(leader.x + ox, leader.y + oy) for ox, oy in DIAMOND_OFFSETS]
+    if len(pts) >= 3:
+        s2 = pygame.Surface((WIDTH, HEIGHT), pygame.SRCALPHA)
+        pygame.draw.lines(s2, (100, 200, 255, 90), True, pts, 1)
+        screen.blit(s2, (0, 0))
+
+
 def draw_nogo_zones(screen):
     for x1, y1, x2, y2 in NOGO_ZONES:
         sx1, sy1 = world_to_screen(x1, y1)
@@ -669,7 +710,6 @@ def draw_nogo_zones(screen):
             pygame.draw.line(s, (200, 60, 60, 120), (i, 0), (i + h, h), 1)
         screen.blit(s, (sx1, sy1))
         pygame.draw.rect(screen, (220, 70, 70), (sx1, sy1, w, h), 1)
-
         ex1, ey1, ex2, ey2 = expand_zone(x1, y1, x2, y2)
         esx1, esy1 = world_to_screen(ex1, ey1)
         esx2, esy2 = world_to_screen(ex2, ey2)
@@ -842,6 +882,8 @@ def load_scenario(agents):
         if waypoint_mode:
             for a in agents:
                 a.rebuild_route()
+        if formation_mode:
+            assign_formation_slots(agents, agents[current_tx_idx].id)
         event_log.appendleft((sim_time, f"Загружено ← {SAVE_FILE}"))
         return current_tx_idx
     except Exception as e:
@@ -860,7 +902,7 @@ def main():
 
     pygame.init()
     screen = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("ЛЧМ + ChaCha20 | 1×1 км | отражение сигнала")
+    pygame.display.set_caption("ЛЧМ + ChaCha20 | строй = ромб + пунктир к TX")
     clock = pygame.time.Clock()
 
     font  = pygame.font.SysFont("Arial", 13, bold=True)
@@ -874,9 +916,6 @@ def main():
         Agent(3, 820, 820, AGENT_COLORS[2]),
         Agent(4, 180, 820, AGENT_COLORS[3]),
     ]
-    agents[1].form_dx, agents[1].form_dy = 120, 0
-    agents[2].form_dx, agents[2].form_dy = 120, 120
-    agents[3].form_dx, agents[3].form_dy = 0, 120
 
     current_tx_idx = 0
     transmitting = False
@@ -918,11 +957,10 @@ def main():
                     formation_mode = not formation_mode
                     if formation_mode:
                         waypoint_mode = False
-                        leader = agents[0]
-                        for a in agents[1:]:
-                            a.form_dx = a.x - leader.x
-                            a.form_dy = a.y - leader.y
-                        event_log.appendleft((sim_time, "Строй ВКЛ"))
+                        assign_formation_slots(agents, agents[current_tx_idx].id)
+                        event_log.appendleft(
+                            (sim_time, f"Строй-ромб ВКЛ → вокруг A{agents[current_tx_idx].id}")
+                        )
                     else:
                         event_log.appendleft((sim_time, "Строй ВЫКЛ"))
                 elif event.key == pygame.K_w:
@@ -1001,6 +1039,11 @@ def main():
                             best_d, best_i = d, i
                     if best_i is not None and best_d < 40:
                         current_tx_idx = best_i
+                        if formation_mode:
+                            assign_formation_slots(agents, agents[current_tx_idx].id)
+                            event_log.appendleft(
+                                (sim_time, f"Ромб перестроился → A{agents[current_tx_idx].id}")
+                            )
 
             elif event.type == pygame.MOUSEBUTTONUP:
                 if event.button in (2, 3):
@@ -1017,7 +1060,7 @@ def main():
             a.tx_active = False
         agents[current_tx_idx].tx_active = transmitting and agents[current_tx_idx].battery > 1
 
-        leader = agents[0] if formation_mode else None
+        leader = agents[current_tx_idx] if formation_mode else None
         for a in agents:
             a.update(dt, leader)
 
@@ -1067,6 +1110,7 @@ def main():
         if show_heatmap:
             draw_heatmap(screen, waves)
         draw_waypoints(screen, agents)
+        draw_formation_links(screen, agents, leader)
 
         for w in waves:
             w.draw(screen)
@@ -1091,15 +1135,15 @@ def main():
         hud_bg.fill((0, 0, 0, 180))
         screen.blit(hud_bg, (0, 0))
         screen.blit(title.render(
-            f"1×1 км  зум {zoom:.2f}×  |  буфер {SAFETY_MARGIN:.0f} м  |  ЛЧМ + ChaCha20",
+            f"1×1 км  зум {zoom:.2f}×  |  буфер {SAFETY_MARGIN:.0f} м  |  ромб {FORMATION_DIST:.0f} м",
             True, ACCENT_COLOR), (8, 3))
         screen.blit(hud.render(
             "ПРОБЕЛ TX  M движ  V вект  H тепло  J лог  G граф  P панель  "
-            "F строй  W маршрут  O отражение  N новые  1-4 сцен  R rnd  +/-  S/L  B бат  C центр",
+            "F ромб  W маршрут  O отражение  N новые  1-4 сцен  R rnd  +/-  S/L  B бат  C центр",
             True, TEXT_COLOR), (8, 24))
         mode = []
-        if formation_mode: mode.append("СТРОЙ")
-        if waypoint_mode: mode.append(f"МАРШРУТ")
+        if formation_mode: mode.append(f"РОМБ→A{tx.id}")
+        if waypoint_mode: mode.append("МАРШРУТ")
         mode_s = " ".join(mode) if mode else scenario_name
         screen.blit(hud.render(
             f"TX:A{tx.id}  |  {'ПЕРЕДАЧА' if transmitting else 'стоп'}  |  "
