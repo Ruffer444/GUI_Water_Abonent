@@ -7,15 +7,11 @@ echo   Сборка MapAUVcoder.exe
 echo ========================================
 echo.
 
-REM Активация venv, если есть
 if exist "venv\Scripts\activate.bat" (
     call venv\Scripts\activate.bat
     echo [OK] venv активирован
-) else (
-    echo [!] venv не найден — используем системный Python
 )
 
-REM Ищем исходник
 set SRC=
 if exist "MapAUVcoder.py" set SRC=MapAUVcoder.py
 if exist "shifr.py"        set SRC=shifr.py
@@ -27,16 +23,32 @@ if "%SRC%"=="" (
 )
 echo [OK] Исходник: %SRC%
 
-REM PyInstaller
+REM Конвертация PNG → ICO, если нужно
+if exist "icon.png" if not exist "icon.ico" (
+    echo [!] Конвертирую icon.png → icon.ico
+    python -c "from PIL import Image; img=Image.open('icon.png').convert('RGBA'); img.save('icon.ico', sizes=[(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)])"
+    if errorlevel 1 (
+        echo [!] Не удалось конвертировать. Установи: pip install pillow
+    )
+)
+
+set ICON_ARG=
+if exist "icon.ico" (
+    set ICON_ARG=--icon=icon.ico
+    echo [OK] Иконка: icon.ico
+) else (
+    echo [!] icon.ico не найден — exe будет без своей иконки
+)
+
 where pyinstaller >nul 2>&1
 if errorlevel 1 (
-    echo [!] PyInstaller не найден — ставлю...
-    pip install pyinstaller pygame
+    echo [!] Ставлю pyinstaller + pygame + pillow...
+    pip install pyinstaller pygame pillow
 )
 
 echo.
 echo Сборка...
-pyinstaller --noconfirm --onefile --windowed --name MapAUVcoder "%SRC%"
+pyinstaller --noconfirm --onefile --windowed --name MapAUVcoder %ICON_ARG% "%SRC%"
 
 if errorlevel 1 (
     echo.
